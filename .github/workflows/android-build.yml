@@ -26,6 +26,14 @@ jobs:
         with:
           gradle-version: '8.9'
 
+      - name: Check Maven Central Access
+        run: |
+          echo "Checking Kotlin Compose compiler plugin..."
+          curl -fSIL --retry 2 https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-compose-compiler-plugin-embeddable/2.0.21/kotlin-compose-compiler-plugin-embeddable-2.0.21.pom
+
+          echo "Checking Kotlin Serialization compiler plugin..."
+          curl -fSIL --retry 2 https://repo.maven.apache.org/maven2/org/jetbrains/kotlin/kotlin-serialization-compiler-plugin-embeddable/2.0.21/kotlin-serialization-compiler-plugin-embeddable-2.0.21.pom
+
       - name: Compile Debug APK and Run Unit Tests
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
