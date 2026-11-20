@@ -60,7 +60,7 @@ fun DeviceInfoScreen(
                 ) {
                     when (val meta = device.metadata) {
                         is AndroidMetadata -> {
-                            val diag = if (meta.displayDiagonalInches > 0f) String.format(Locale.US, "%.1f"", meta.displayDiagonalInches) else "Android"
+                            val diag = if (meta.displayDiagonalInches > 0f) String.format(Locale.US, "%.1f\"", meta.displayDiagonalInches) else "Android"
                             val res = if (meta.displayWidthPx > 0 && meta.displayHeightPx > 0) "${maxOf(meta.displayHeightPx, meta.displayWidthPx)}x${minOf(meta.displayHeightPx, meta.displayWidthPx)}" else "API ${meta.sdkInt}"
                             item {
                                 TelemetryCard(modifier = Modifier.fillMaxWidth()) {
