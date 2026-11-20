@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -208,9 +209,14 @@ private fun CpuBentoCard(state: DashboardUiState, onClick: () -> Unit) {
     val androidPayload = state.latestSnapshot?.payload as? AndroidTelemetry
     val pcPayload = state.latestSnapshot?.payload as? ComputerTelemetry
     val loadProgress = androidPayload?.cpuFrequencyLoadPct ?: pcPayload?.cpuUsagePct?.coerceIn(0f, 1f)
-    val peakMhz = androidPayload?.cpuCoreFreqsMhz?.maxOrNull() ?: 0
+    val avgMhz = androidPayload?.cpuAvgFreqMhz
+    val clockCaption = when {
+        androidPayload != null -> "Average Core Clock"
+        pcPayload != null -> "CPU Load"
+        else -> "Average Core Clock"
+    }
     val clockLabel = when {
-        peakMhz > 0 -> TelemetryFormatters.formatFrequencyMhz(peakMhz)
+        avgMhz != null -> TelemetryFormatters.formatFrequencyMhz(avgMhz)
         pcPayload != null -> "${(pcPayload.cpuUsagePct * 100).toInt()}% Load"
         else -> "-- Mhz"
     }
@@ -224,7 +230,22 @@ private fun CpuBentoCard(state: DashboardUiState, onClick: () -> Unit) {
             Spacer(modifier = Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 GradientRingGauge(progress = loadProgress, modifier = Modifier.size(54.dp), strokeWidth = 4.5.dp, fontSize = 12.sp)
-                Text(clockLabel, style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp))
+                Spacer(modifier = Modifier.width(8.dp))
+                Column(modifier = Modifier.weight(1f), horizontalAlignment = Alignment.End) {
+                    Text(
+                        text = clockCaption,
+                        style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 12.sp),
+                        color = TextSecondary,
+                        textAlign = TextAlign.End,
+                        maxLines = 2
+                    )
+                    Spacer(modifier = Modifier.height(2.dp))
+                    Text(
+                        text = clockLabel,
+                        style = MaterialTheme.typography.labelLarge.copy(fontSize = 14.sp),
+                        maxLines = 1
+                    )
+                }
             }
         }
         Spacer(modifier = Modifier.height(10.dp))
@@ -359,7 +380,7 @@ private fun DeviceWireframeBentoCard(device: UnifiedDevice?, onClick: () -> Unit
     val category = device?.category ?: DeviceCategory.ANDROID
     val (primary, secondary) = when (val meta = device?.metadata) {
         is AndroidMetadata -> {
-            val diag = if (meta.displayDiagonalInches > 0f) String.format(Locale.US, "%.1f\"", meta.displayDiagonalInches) else "Android"
+            val diag = if (meta.displayDiagonalInches > 0f) String.format(Locale.US, "%.1f"", meta.displayDiagonalInches) else "Android"
             val res = if (meta.displayWidthPx > 0 && meta.displayHeightPx > 0) "${maxOf(meta.displayHeightPx, meta.displayWidthPx)}x${minOf(meta.displayHeightPx, meta.displayWidthPx)}" else "API ${meta.sdkInt}"
             diag to res
         }

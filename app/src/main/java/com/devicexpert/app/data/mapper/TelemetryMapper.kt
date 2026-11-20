@@ -1,5 +1,6 @@
 package com.devicexpert.app.data.mapper
 
+import com.devicexpert.app.data.collector.CpuThermalCollector
 import com.devicexpert.app.data.local.entity.TelemetryEntity
 import com.devicexpert.app.data.local.entity.TelemetryPayloadDto
 import com.devicexpert.app.domain.model.telemetry.AndroidTelemetry
@@ -35,6 +36,8 @@ fun TelemetryEntity.toDomain(): TelemetrySnapshot {
             cpuCoreFreqsMhz = payloadDto.cpuCoreFreqsMhz,
             cpuCoreMinFreqsMhz = payloadDto.cpuCoreMinFreqsMhz,
             cpuCoreMaxFreqsMhz = payloadDto.cpuCoreMaxFreqsMhz,
+            cpuAvgFreqMhz = payloadDto.cpuAvgFreqMhz ?: CpuThermalCollector.computeAverageMhz(payloadDto.cpuCoreFreqsMhz),
+            cpuPeakFreqMhz = payloadDto.cpuPeakFreqMhz ?: CpuThermalCollector.computePeakMhz(payloadDto.cpuCoreFreqsMhz),
             cpuFrequencyLoadPct = payloadDto.cpuFrequencyLoadPct,
             thermalStatus = payloadDto.thermalStatus,
             thermalHeadroom = payloadDto.thermalHeadroom,
@@ -107,6 +110,8 @@ fun TelemetrySnapshot.toEntity(): TelemetryEntity {
             cpuCoreFreqsMhz = pl.cpuCoreFreqsMhz,
             cpuCoreMinFreqsMhz = pl.cpuCoreMinFreqsMhz,
             cpuCoreMaxFreqsMhz = pl.cpuCoreMaxFreqsMhz,
+            cpuAvgFreqMhz = pl.cpuAvgFreqMhz,
+            cpuPeakFreqMhz = pl.cpuPeakFreqMhz,
             cpuFrequencyLoadPct = pl.cpuFrequencyLoadPct,
             thermalStatus = pl.thermalStatus,
             thermalHeadroom = pl.thermalHeadroom,

@@ -26,6 +26,8 @@ data class AndroidTelemetry(
     val cpuCoreFreqsMhz: List<Int>,
     val cpuCoreMinFreqsMhz: List<Int> = emptyList(),
     val cpuCoreMaxFreqsMhz: List<Int> = emptyList(),
+    val cpuAvgFreqMhz: Int? = null,
+    val cpuPeakFreqMhz: Int? = null,
     val cpuFrequencyLoadPct: Float? = null,
     val thermalStatus: Int,
     val thermalHeadroom: Float? = null,

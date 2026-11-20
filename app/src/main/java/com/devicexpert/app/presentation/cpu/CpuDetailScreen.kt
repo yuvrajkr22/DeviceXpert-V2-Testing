@@ -70,7 +70,10 @@ fun CpuDetailScreen(
                 val androidPayload = uiState.payload as? AndroidTelemetry
                 val pcPayload = uiState.payload as? ComputerTelemetry
 
-                val coreCount = androidMeta?.cpuCoreCount?.takeIf { it > 0 } ?: androidPayload?.cpuCoreFreqsMhz?.size ?: pcMeta?.coreCount ?: 0
+                val coreCount = androidPayload?.cpuCoreFreqsMhz?.size?.takeIf { it > 0 }
+                    ?: androidMeta?.cpuCoreCount?.takeIf { it > 0 }
+                    ?: pcMeta?.coreCount
+                    ?: 0
                 val socName = androidMeta?.socModel ?: pcMeta?.cpuModel ?: "Processor"
                 val abiSummary = androidMeta?.supportedAbis?.joinToString(", ")?.ifBlank { "Unknown" } ?: pcMeta?.osName ?: "Unknown"
                 val coreIndices = (0 until (androidPayload?.cpuCoreFreqsMhz?.size ?: 0)).toList()
@@ -88,7 +91,8 @@ fun CpuDetailScreen(
                             coreCount = coreCount,
                             loadProgress = androidPayload?.cpuFrequencyLoadPct ?: pcPayload?.cpuUsagePct,
                             isPcTrueUsage = pcPayload != null,
-                            peakMhz = androidPayload?.cpuCoreFreqsMhz?.maxOrNull() ?: 0,
+                            avgMhz = androidPayload?.cpuAvgFreqMhz,
+                            peakMhz = androidPayload?.cpuPeakFreqMhz,
                             history = uiState.liveLoadHistory
                         )
                     }
@@ -132,7 +136,7 @@ fun CpuDetailScreen(
                             TelemetryCard(modifier = Modifier.fillMaxWidth()) {
                                 Text("Android OS Transparency", style = MaterialTheme.typography.titleSmall, color = CyanPulse)
                                 Spacer(Modifier.height(4.dp))
-                                Text("Android 8+ blocks unprivileged apps from reading /proc/stat. The load index above reflects real-time hardware frequency scaling across active cores rather than fabricated CPU percentages.", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
+                                Text("Android 8+ blocks unprivileged apps from reading /proc/stat. Average Core Clock and Peak Core Clock are derived from live online-core cpufreq readings, and the ring reflects hardware frequency scaling rather than OS scheduler utilization.", style = MaterialTheme.typography.bodyMedium, color = TextSecondary)
                             }
                         }
                     }
@@ -144,7 +148,16 @@ fun CpuDetailScreen(
 }
 
 @Composable
-private fun CpuHeroCard(socName: String, abiSummary: String, coreCount: Int, loadProgress: Float?, isPcTrueUsage: Boolean, peakMhz: Int, history: List<Float>) {
+private fun CpuHeroCard(
+    socName: String,
+    abiSummary: String,
+    coreCount: Int,
+    loadProgress: Float?,
+    isPcTrueUsage: Boolean,
+    avgMhz: Int?,
+    peakMhz: Int?,
+    history: List<Float>
+) {
     TelemetryCard(modifier = Modifier.fillMaxWidth(), contentPadding = PaddingValues(0.dp)) {
         Column(modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -155,11 +168,37 @@ private fun CpuHeroCard(socName: String, abiSummary: String, coreCount: Int, loa
             Text("$coreCount Cores • $abiSummary", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
             Spacer(Modifier.height(16.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                GradientRingGauge(progress = loadProgress, modifier = Modifier.size(84.dp), strokeWidth = 7.dp, fontSize = 17.sp)
-                Column(horizontalAlignment = Alignment.End) {
-                    Text(if (isPcTrueUsage) "CPU Utilization" else "Frequency Scaling Index", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    GradientRingGauge(progress = loadProgress, modifier = Modifier.size(84.dp), strokeWidth = 7.dp, fontSize = 17.sp)
                     Spacer(Modifier.height(4.dp))
-                    Text(if (peakMhz > 0) TelemetryFormatters.formatFrequencyMhz(peakMhz) else "Peak Clock N/A", style = MaterialTheme.typography.headlineSmall.copy(fontSize = 22.sp, fontWeight = FontWeight.Bold))
+                    Text(
+                        text = if (isPcTrueUsage) "CPU Utilization" else "Freq Scaling",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = TextSecondary
+                    )
+                }
+                Column(horizontalAlignment = Alignment.End) {
+                    if (isPcTrueUsage) {
+                        Text("CPU Utilization", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = loadProgress?.let { "${(it * 100f).toInt()}%" } ?: "Unavailable",
+                            style = MaterialTheme.typography.headlineSmall.copy(fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                        )
+                    } else {
+                        Text("Average Core Clock", style = MaterialTheme.typography.labelMedium, color = TextSecondary)
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = avgMhz?.let { TelemetryFormatters.formatFrequencyMhz(it) } ?: "Unavailable",
+                            style = MaterialTheme.typography.headlineSmall.copy(fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            text = "Peak Core Clock: ${peakMhz?.let { TelemetryFormatters.formatFrequencyMhz(it) } ?: "Unavailable"}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = TextSecondary
+                        )
+                    }
                 }
             }
         }

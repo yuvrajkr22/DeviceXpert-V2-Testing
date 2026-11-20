@@ -15,17 +15,20 @@ import com.devicexpert.app.domain.repository.SensorRepository
 import com.devicexpert.app.domain.repository.SettingsRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
-import kotlinx.coroutines.launch
 import javax.inject.Inject
 
 enum class HealthBannerState { HEALTHY, WARNING, CRITICAL }
@@ -49,137 +52,143 @@ data class DashboardUiState(
 @HiltViewModel
 class DashboardViewModel @Inject constructor(
     private val activeDeviceManager: ActiveDeviceManager,
-    private val deviceRepository: DeviceRepository,
-    private val alertRepository: AlertRepository,
+    deviceRepository: DeviceRepository,
+    alertRepository: AlertRepository,
     private val sensorRepository: SensorRepository,
-    private val settingsRepository: SettingsRepository,
+    settingsRepository: SettingsRepository,
     private val connectorRegistry: ConnectorRegistry
 ) : ViewModel() {
 
     private val _isLivePaused = MutableStateFlow(false)
-    private val _uiState = MutableStateFlow(DashboardUiState())
-    val uiState: StateFlow<DashboardUiState> = _uiState.asStateFlow()
 
     private val cpuRingBuffer = ArrayDeque<Float>(MAX_SPARKLINE_POINTS)
     private val rxRingBuffer = ArrayDeque<Float>(MAX_SPARKLINE_POINTS)
     private val txRingBuffer = ArrayDeque<Float>(MAX_SPARKLINE_POINTS)
     private var lastDeviceId: String? = null
+    private var lastSnapshot: TelemetrySnapshot? = null
+    private var lastCompassAzimuthDeg: Float? = null
 
-    init {
-        observeDevicesAndAlerts()
-        observeLiveTelemetryStream()
-        observeLocalCompass()
+    private val activeDeviceFlow = activeDeviceManager.observeActiveDevice()
+        .distinctUntilChanged()
+
+    private val pollingIntervalFlow = settingsRepository.observeAppSettings()
+        .map { it.livePollingIntervalMs }
+        .distinctUntilChanged()
+
+    private val telemetryStreamFlow: Flow<Pair<TelemetrySnapshot?, String?>> = combine(
+        activeDeviceFlow,
+        _isLivePaused,
+        pollingIntervalFlow
+    ) { device, paused, intervalMs -> Triple(device, paused, intervalMs) }
+        .flatMapLatest { (device, paused, intervalMs) ->
+            if (device?.id != lastDeviceId) {
+                lastDeviceId = device?.id
+                lastSnapshot = null
+                cpuRingBuffer.clear()
+                rxRingBuffer.clear()
+                txRingBuffer.clear()
+            }
+
+            val cachedForDevice = lastSnapshot?.takeIf { it.deviceId == device?.id }
+            if (device == null || paused) {
+                flowOf(cachedForDevice to null)
+            } else {
+                val connector = connectorRegistry.getConnector(device.category)
+                connector.observeLiveTelemetry(device, intervalMs = intervalMs)
+                    .onEach { snapshot ->
+                        lastSnapshot = snapshot
+                        when (val pl = snapshot.payload) {
+                            is AndroidTelemetry -> {
+                                pushRingPoint(cpuRingBuffer, (pl.cpuFrequencyLoadPct ?: 0f) * 100f)
+                                pushRingPoint(rxRingBuffer, pl.rxBytesPerSec.toFloat())
+                                pushRingPoint(txRingBuffer, pl.txBytesPerSec.toFloat())
+                            }
+                            is ComputerTelemetry -> {
+                                pushRingPoint(cpuRingBuffer, (pl.cpuUsagePct * 100f).coerceIn(0f, 100f))
+                                pushRingPoint(rxRingBuffer, pl.netRxBps.toFloat())
+                                pushRingPoint(txRingBuffer, pl.netTxBps.toFloat())
+                            }
+                            else -> Unit
+                        }
+                    }
+                    .map<TelemetrySnapshot, Pair<TelemetrySnapshot?, String?>> { it to null }
+                    .onStart { emit(cachedForDevice to null) }
+                    .catch { e ->
+                        emit(
+                            (lastSnapshot?.takeIf { it.deviceId == device.id }) to
+                                (e.localizedMessage ?: "Telemetry stream interrupted")
+                        )
+                    }
+            }
+        }
+
+    private val compassStreamFlow: Flow<Float?> = combine(activeDeviceFlow, _isLivePaused) { device, paused ->
+        device to paused
+    }.flatMapLatest { (device, paused) ->
+        if (device != null && device.isLocalHost && !paused) {
+            sensorRepository.observeLiveSensors()
+                .map { readings ->
+                    lastCompassAzimuthDeg = readings.compassAzimuthDeg
+                    readings.compassAzimuthDeg
+                }
+                .onStart { emit(lastCompassAzimuthDeg) }
+        } else {
+            flowOf(if (device?.isLocalHost == true) lastCompassAzimuthDeg else null)
+        }
     }
+
+    private val deviceAndAlertFlow = combine(
+        activeDeviceFlow,
+        deviceRepository.observeAllDevices(),
+        alertRepository.observeUnacknowledgedEvents()
+    ) { active, all, alerts -> Triple(active, all, alerts) }
+
+    private val liveTelemetryBundleFlow = combine(
+        telemetryStreamFlow,
+        compassStreamFlow,
+        _isLivePaused
+    ) { telemetryResult, compass, paused -> Triple(telemetryResult, compass, paused) }
+
+    // WhileSubscribed(0L) immediately stops upstream polling when navigating away from Dashboard
+    // (e.g. to CpuDetailScreen), avoiding duplicate collectors while retaining ring-buffer history.
+    val uiState: StateFlow<DashboardUiState> = combine(
+        deviceAndAlertFlow,
+        liveTelemetryBundleFlow
+    ) { (active, all, alerts), (telemetryResult, compass, paused) ->
+        val (snapshot, streamError) = telemetryResult
+        val hasCritical = alerts.any { it.severity == AlertSeverity.CRITICAL }
+        val hasWarning = alerts.any { it.severity == AlertSeverity.WARNING }
+        val score = snapshot?.healthScore ?: 100
+        val health = when {
+            hasCritical || score < 60 -> HealthBannerState.CRITICAL
+            hasWarning || alerts.isNotEmpty() || score < 80 -> HealthBannerState.WARNING
+            else -> HealthBannerState.HEALTHY
+        }
+
+        DashboardUiState(
+            isLoading = active == null && all.isEmpty(),
+            activeDevice = active,
+            allDevices = all,
+            latestSnapshot = snapshot,
+            isLivePaused = paused,
+            cpuLoadHistory = cpuRingBuffer.toList(),
+            rxSpeedHistory = rxRingBuffer.toList(),
+            txSpeedHistory = txRingBuffer.toList(),
+            compassAzimuthDeg = compass,
+            activeAlertCount = alerts.size,
+            healthState = health,
+            streamError = streamError
+        )
+    }.stateIn(
+        scope = viewModelScope,
+        started = SharingStarted.WhileSubscribed(stopTimeoutMillis = 0L),
+        initialValue = DashboardUiState(isLoading = true)
+    )
 
     fun selectDevice(deviceId: String) = activeDeviceManager.selectDevice(deviceId)
 
     fun toggleLivePause() {
         _isLivePaused.update { !it }
-        _uiState.update { it.copy(isLivePaused = _isLivePaused.value) }
-    }
-
-    private fun observeDevicesAndAlerts() {
-        viewModelScope.launch {
-            combine(
-                activeDeviceManager.observeActiveDevice(),
-                deviceRepository.observeAllDevices(),
-                alertRepository.observeUnacknowledgedEvents()
-            ) { active, all, alerts -> Triple(active, all, alerts) }.collect { (active, all, alerts) ->
-                if (active?.id != lastDeviceId) {
-                    lastDeviceId = active?.id
-                    cpuRingBuffer.clear()
-                    rxRingBuffer.clear()
-                    txRingBuffer.clear()
-                }
-                val hasCritical = alerts.any { it.severity == AlertSeverity.CRITICAL }
-                val hasWarning = alerts.any { it.severity == AlertSeverity.WARNING }
-                _uiState.update { state ->
-                    val score = state.latestSnapshot?.healthScore ?: 100
-                    val health = when {
-                        hasCritical || score < 60 -> HealthBannerState.CRITICAL
-                        hasWarning || score < 80 -> HealthBannerState.WARNING
-                        else -> HealthBannerState.HEALTHY
-                    }
-                    state.copy(
-                        isLoading = active == null && all.isEmpty(),
-                        activeDevice = active,
-                        allDevices = all,
-                        activeAlertCount = alerts.size,
-                        healthState = health,
-                        cpuLoadHistory = cpuRingBuffer.toList(),
-                        rxSpeedHistory = rxRingBuffer.toList(),
-                        txSpeedHistory = txRingBuffer.toList()
-                    )
-                }
-            }
-        }
-    }
-
-    private fun observeLiveTelemetryStream() {
-        viewModelScope.launch {
-            val pollingFlow = settingsRepository.observeAppSettings()
-                .map { it.livePollingIntervalMs }
-                .distinctUntilChanged()
-
-            combine(
-                activeDeviceManager.observeActiveDevice(),
-                _isLivePaused,
-                pollingFlow
-            ) { device, paused, intervalMs -> Triple(device, paused, intervalMs) }
-                .flatMapLatest { (device, paused, intervalMs) ->
-                    if (device == null || paused) {
-                        emptyFlow()
-                    } else {
-                        val connector = connectorRegistry.getConnector(device.category)
-                        _uiState.update { it.copy(streamError = null) }
-                        connector.observeLiveTelemetry(device, intervalMs = intervalMs)
-                            .catch { e ->
-                                _uiState.update { it.copy(streamError = e.localizedMessage ?: "Telemetry stream interrupted") }
-                            }
-                    }
-                }.collect { snapshot ->
-                    when (val pl = snapshot.payload) {
-                        is AndroidTelemetry -> {
-                            pushRingPoint(cpuRingBuffer, (pl.cpuFrequencyLoadPct ?: 0f) * 100f)
-                            pushRingPoint(rxRingBuffer, pl.rxBytesPerSec.toFloat())
-                            pushRingPoint(txRingBuffer, pl.txBytesPerSec.toFloat())
-                        }
-                        is ComputerTelemetry -> {
-                            pushRingPoint(cpuRingBuffer, (pl.cpuUsagePct * 100f).coerceIn(0f, 100f))
-                            pushRingPoint(rxRingBuffer, pl.netRxBps.toFloat())
-                            pushRingPoint(txRingBuffer, pl.netTxBps.toFloat())
-                        }
-                        else -> Unit
-                    }
-                    _uiState.update { state ->
-                        val health = when {
-                            state.healthState == HealthBannerState.CRITICAL || snapshot.healthScore < 60 -> HealthBannerState.CRITICAL
-                            state.activeAlertCount > 0 || snapshot.healthScore < 80 -> HealthBannerState.WARNING
-                            else -> HealthBannerState.HEALTHY
-                        }
-                        state.copy(
-                            isLoading = false,
-                            latestSnapshot = snapshot,
-                            cpuLoadHistory = cpuRingBuffer.toList(),
-                            rxSpeedHistory = rxRingBuffer.toList(),
-                            txSpeedHistory = txRingBuffer.toList(),
-                            healthState = health
-                        )
-                    }
-                }
-        }
-    }
-
-    private fun observeLocalCompass() {
-        viewModelScope.launch {
-            combine(activeDeviceManager.observeActiveDevice(), _isLivePaused) { d, p -> d to p }
-                .flatMapLatest { (device, paused) ->
-                    if (device != null && device.isLocalHost && !paused) sensorRepository.observeLiveSensors()
-                    else emptyFlow()
-                }.collect { readings ->
-                    _uiState.update { it.copy(compassAzimuthDeg = readings.compassAzimuthDeg) }
-                }
-        }
     }
 
     private fun pushRingPoint(buffer: ArrayDeque<Float>, value: Float) {
